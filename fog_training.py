@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from config import (
-    SEEDS, FOG_TEST_SPLITS, DEVICE, RESULTS_DIR, RUN_TAG, DATASET, MAIN_SCORES,
+    SEEDS, FOG_TEST_SPLITS, DEVICE, RESULTS_DIR, RUN_TAG, DATASET, MAIN_SCORES, SAMPLING,
     YOLO_WEIGHTS, STAGE_FILTERS, GATE_USE_FEATURES, GATE_DETACH_FILTER, AUG_GROUPS,
     YOLO_TRAIN, YOLO_LR_MULT, PREPROC_ON,
     DET_LR, DET_BATCH_SIZE, DET_NUM_EPOCHS, DET_GRAD_CLIP,
@@ -47,10 +47,10 @@ def build_model(seed):
 
 #one name for the whole run, it ends up in the results folder: results/run_<run_name>_<seed>
 detector = YOLO_WEIGHTS.replace(".pt", "")
-extra = (f"_yolo-{YOLO_TRAIN}" if YOLO_TRAIN != "none" else "") + ("" if PREPROC_ON else "_nopreproc") + (f"_ep{DET_NUM_EPOCHS}" if DET_NUM_EPOCHS != 30 else "") + ("" if DATASET == "fog_416" else f"_{DATASET}") #what differs from the standard runs
+extra = (f"_yolo-{YOLO_TRAIN}" if YOLO_TRAIN != "none" else "") + ("" if PREPROC_ON else "_nopreproc") + (f"_ep{DET_NUM_EPOCHS}" if DET_NUM_EPOCHS != 30 else "") + ("" if DATASET == "fog_416" else f"_{DATASET}") + ("" if SAMPLING == "none" else f"_sampling-{SAMPLING}") #what differs from the standard runs
 run_name = f"spagate_{detector}_{RUN_TAG}{extra}_lr{DET_LR:g}"
 print(f"run name: {run_name} | seeds: {SEEDS}")
-print(f"dataset: {DATASET} | test splits: {FOG_TEST_SPLITS}")
+print(f"dataset: {DATASET} | sampling: {SAMPLING} | test splits: {FOG_TEST_SPLITS}")
 print(f"main scores: " + " | ".join(f"{name} = {splits if splits else 'not used with this dataset'}" for name, splits in MAIN_SCORES.items()))
 print(f"stages: {STAGE_FILTERS} | gate features: {GATE_USE_FEATURES} | augmentation groups: {sorted(AUG_GROUPS)}")
 print(f"preproc on: {PREPROC_ON} | detector training: {YOLO_TRAIN} (lr x {YOLO_LR_MULT})")
@@ -59,7 +59,7 @@ out_dir = RESULTS_DIR / f"summary_{run_name}"
 out_dir.mkdir(parents=True, exist_ok=True)
 with open(out_dir / "config.json", "w") as f: #so the folder says which run it was, even if it is renamed later
     json.dump({
-        "run_name": run_name, "dataset": DATASET, "test_splits": FOG_TEST_SPLITS, "main_scores": MAIN_SCORES, "detector": YOLO_WEIGHTS, "stage_filters": STAGE_FILTERS,
+        "run_name": run_name, "dataset": DATASET, "sampling": SAMPLING, "test_splits": FOG_TEST_SPLITS, "main_scores": MAIN_SCORES, "detector": YOLO_WEIGHTS, "stage_filters": STAGE_FILTERS,
         "gate_use_features": GATE_USE_FEATURES, "gate_detach_filter": GATE_DETACH_FILTER,
         "lr": DET_LR, "gate_lr_mult": GATE_LR_MULT, "batch_size": DET_BATCH_SIZE,
         "epochs": DET_NUM_EPOCHS, "grad_clip": DET_GRAD_CLIP, "seeds": SEEDS, "aug_groups": sorted(AUG_GROUPS), "preproc_on": PREPROC_ON, "yolo_train": YOLO_TRAIN, "yolo_lr_mult": YOLO_LR_MULT,

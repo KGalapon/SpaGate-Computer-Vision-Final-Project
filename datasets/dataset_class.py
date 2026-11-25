@@ -3,18 +3,21 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 from config import (
     FOG_DIR, FOG_SPLIT_FILES, FOG_TEST_SPLITS, WEATHER_TRAIN_SPLITS, FOG_BETAS, FOGGY_PROB,
     DEVICE, NUM_WORKERS, DET_BATCH_SIZE,
-    AUG_FOG, AUG_SENSOR, AUG_GEOM,
+    AUG_FOG, AUG_SENSOR, AUG_GEOM, AUG_HAZE, AUG_COLOR, AUG_WEATHER_SENSOR,
     AUG_CUSTOM_FOG_PROB, AUG_FOG_TAU_NEAR, AUG_FOG_TAU_FAR, AUG_FOG_GRADIENT_GAMMA, AUG_FOG_NOISE_AMOUNT,
     AUG_AIRLIGHT_RANGE, AUG_AIRLIGHT_TINT,
     AUG_BLUR_PROB, AUG_BLUR_SIGMA, AUG_NOISE_PROB, AUG_NOISE_SIGMA, AUG_JPEG_PROB, AUG_JPEG_QUALITY,
     AUG_CROP_PROB, AUG_CROP_SIDE,
     AUG_AFFINE_PROB, AUG_AFFINE_SCALE, AUG_AFFINE_ROTATE, AUG_AFFINE_SHEAR, AUG_AFFINE_TRANSLATE,
     AUG_BOX_MIN_SIDE, AUG_BOX_MIN_VISIBLE,
+    AUG_HAZE_AIRLIGHT_RANGE, AUG_HAZE_AIRLIGHT_TINT,
+    AUG_COLOR_PROB, AUG_COLOR_BRIGHTNESS, AUG_COLOR_CONTRAST, AUG_COLOR_SATURATION, AUG_COLOR_GAMMA, AUG_COLOR_CAST,
+    SAMPLING, SAMPLE_RARE_THRESHOLD, SAMPLE_MAX_REPEAT, DET_NUM_CLASSES, CLASS_NAMES,
 )
 
 PAD_VALUE = 128 / 255.0 #grey of the letterbox bars, the new borders made by the affine are filled with the same grey
@@ -102,8 +105,12 @@ def render_depth_fog(image):
     tau = tau_near + (tau_far - tau_near) * depth #shape: (h, w)
     t = np.exp(-tau)[:, :, None].astype(np.float32) #transmission, shape: (h, w, 1)
 
-    tint = np.array([rand_uniform(-AUG_AIRLIGHT_TINT, AUG_AIRLIGHT_TINT) for _ in range(3)], dtype=np.float32)
-    airlight = np.clip(rand_uniform(*AUG_AIRLIGHT_RANGE) + tint, 0.0, 1.0).reshape(1, 1, 3) #the fog colour
+    if AUG_HAZE: #wider and more tinted fog colours, so the fog also looks like dust or smoke haze
+        airlight_range, airlight_tint = AUG_HAZE_AIRLIGHT_RANGE, AUG_HAZE_AIRLIGHT_TINT
+    else:
+        airlight_range, airlight_tint = AUG_AIRLIGHT_RANGE, AUG_AIRLIGHT_TINT
+    tint = np.array([rand_uniform(-airlight_tint, airlight_tint) for _ in range(3)], dtype=np.float32)
+    airlight = np.clip(rand_uniform(*airlight_range) + tint, 0.0, 1.0).reshape(1, 1, 3) #the fog colour
 
     fogged = image.copy()
     fogged[y0:y1, x0:x1] = image[y0:y1, x0:x1] * t + airlight * (1 - t)
@@ -133,6 +140,28 @@ def sensor_effects(image):
 
     result = image.copy()
     result[y0:y1, x0:x1] = out[y0:y1, x0:x1] #bars stay exactly as they were
+    return result.astype(np.float32)
+
+
+def color_jitter(image):
+    #gamma, contrast, brightness, saturation and a colour cast, for the colour casts of dust, smoke, flood water and so on
+    #the letterbox bars are put back exactly afterwards
+    if not rand_chance(AUG_COLOR_PROB):
+        return image
+    y0, y1, x0, x1 = content_box(image)
+    out = image[y0:y1, x0:x1].copy()
+
+    out = np.power(np.clip(out, 0.0, 1.0), rand_uniform(*AUG_COLOR_GAMMA)) #gamma
+    mean = out.mean()
+    out = (out - mean) * rand_uniform(*AUG_COLOR_CONTRAST) + mean #contrast around the mean of the picture
+    out = out * rand_uniform(*AUG_COLOR_BRIGHTNESS) #brightness
+    gray = (out * np.array([0.299, 0.587, 0.114], dtype=np.float32)).sum(axis=2, keepdims=True) #brightness of every pixel, rgb order
+    out = gray + (out - gray) * rand_uniform(*AUG_COLOR_SATURATION) #saturation
+    gains = np.array([rand_uniform(1 - AUG_COLOR_CAST, 1 + AUG_COLOR_CAST) for _ in range(3)], dtype=np.float32)
+    out = np.clip(out * gains, 0.0, 1.0) #colour cast, one gain per colour channel
+
+    result = image.copy()
+    result[y0:y1, x0:x1] = out
     return result.astype(np.float32)
 
 
@@ -256,8 +285,11 @@ class FogDataset(Dataset): #one split of fog_416 (or of the combined dataset), b
         if self.use_augment and self.split == "train":
             if use_custom_fog:
                 image = render_depth_fog(image) #depth-dependent fog with a random colour
-            if is_foggy and AUG_SENSOR:
-                image = sensor_effects(image) #blur, noise, jpeg, after the fog
+            is_weather = not self.can_fog[index] #a real bad weather image of the combined dataset
+            if (is_foggy and AUG_SENSOR) or (is_weather and AUG_WEATHER_SENSOR):
+                image = sensor_effects(image) #blur, noise, jpeg, after the fog, the weather images only get it with the wsensor group
+            if AUG_COLOR:
+                image = color_jitter(image) #brightness, contrast, saturation, gamma and colour cast, every training image
             if AUG_GEOM:
                 image, boxes = geometric_augment(image, boxes) #random crop and affine, boxes move with the image
 
@@ -286,9 +318,42 @@ def collate_fn(samples):
     return images, boxes_list #boxes_list has one (N, 5) tensor per image
 
 
+def rare_class_weights(samples):
+    #repeat factor sampling: an image with a class that only a small share of the images contain is drawn more often
+    #class c is in a share f_c of the images, its repeat factor is max(1, sqrt(threshold / f_c)), capped at SAMPLE_MAX_REPEAT
+    #an image gets the largest repeat factor of the classes in it, so a rare class is not diluted by common ones in the same image
+    present = [sorted({int(c) for c in boxes[:, 4]}) for _, boxes in samples] #the classes in each image
+    share = np.zeros(DET_NUM_CLASSES)
+    for classes in present:
+        for c in classes:
+            share[c] += 1
+    share /= max(len(samples), 1)
+
+    class_repeat = np.ones(DET_NUM_CLASSES)
+    for c in range(DET_NUM_CLASSES):
+        if share[c] > 0:
+            class_repeat[c] = min(max(1.0, np.sqrt(SAMPLE_RARE_THRESHOLD / share[c])), SAMPLE_MAX_REPEAT)
+    weights = np.array([max([class_repeat[c] for c in classes], default=1.0) for classes in present], dtype=np.float64)
+
+    print("rare class sampling, share of the images with each class, before -> after, and its repeat factor:")
+    for c in range(DET_NUM_CLASSES):
+        after = sum(w for w, classes in zip(weights, present) if c in classes) / weights.sum()
+        print(f"  {CLASS_NAMES[c]:11s} {share[c]:.3f} -> {after:.3f} | x{class_repeat[c]:.2f}")
+    return weights
+
+
 def make_train_loader(seed, batch_size=DET_BATCH_SIZE):
     generator = torch.Generator().manual_seed(seed) #same shuffling for the same seed
     dataset = FogDataset("train", use_flip=True)
+
+    if SAMPLING == "rare":
+        weights = torch.from_numpy(rare_class_weights(dataset.samples))
+        sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True, generator=generator) #same number of images per epoch as a plain shuffle
+        return DataLoader(
+            dataset, batch_size=batch_size, sampler=sampler, generator=generator, drop_last=True,
+            num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), collate_fn=collate_fn,
+        )
+
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=True, generator=generator, drop_last=True,
         num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), collate_fn=collate_fn,

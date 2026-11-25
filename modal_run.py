@@ -36,14 +36,15 @@ VARIANTS = {
 
 
 def aug_label(aug):
-    #short label for the run name: noaug, aug (all three groups), or for example aug-fog+geom
+    #short label for the run name: noaug, aug (fog, sensor and geom), aug+color+haze (those three and the optional groups), or for example aug-fog+geom
     if aug == "all":
         aug = "fog,sensor,geom"
-    groups = sorted(g for g in aug.split(",") if g in ("fog", "sensor", "geom"))
+    groups = sorted(g for g in aug.split(",") if g in ("fog", "sensor", "geom", "haze", "color", "wsensor"))
     if not groups:
         return "noaug"
-    if groups == ["fog", "geom", "sensor"]:
-        return "aug"
+    standard = {"fog", "sensor", "geom"}
+    if standard <= set(groups):
+        return "aug" + "".join("+" + g for g in groups if g not in standard)
     return "aug-" + "+".join(groups)
 
 
@@ -72,11 +73,12 @@ def unpack_dataset_archive(archive, target, work_dir):
     timeout=8 * 60 * 60,          # 8 hours, a ceiling only (you pay for the time actually used), the sync in `finally` does not run if modal kills the container
     volumes={"/data": vol},
 )
-def run(variant: str = "D", seeds: str = "42", aug: str = "fog,sensor,geom", yolo: str = "none", preproc: str = "1", epochs: int = 30, dataset: str = "fog_416"):
+def run(variant: str = "D", seeds: str = "42", aug: str = "fog,sensor,geom", yolo: str = "none", preproc: str = "1", epochs: int = 30, dataset: str = "fog_416", sampling: str = "none"):
     import os, sys, shutil, tarfile, subprocess, threading, time
 
     assert variant in VARIANTS, f"variant must be one of {list(VARIANTS)}"
     assert dataset in ("fog_416", "combined"), "dataset must be fog_416 or combined"
+    assert sampling in ("none", "rare"), "sampling must be none or rare"
     v = VARIANTS[variant]
 
     proj = "/tmp/proj"
@@ -150,9 +152,10 @@ def run(variant: str = "D", seeds: str = "42", aug: str = "fog,sensor,geom", yol
         "PREPROC": preproc,                          # 0 trains the detector with no preprocessor
         "AUG": aug,                                  # augmentation groups, read by config.py, "none" turns them off
         "DATASET": dataset,                          # fog_416 or combined, read by config.py
+        "SAMPLING": sampling,                        # none or rare, read by config.py
         "RUN_TAG": f"{variant}_{aug_label(aug)}",
     }
-    print(f"variant {variant}: stages {v['stages']} | gate features {v['features']} | seeds {seeds} | aug {aug} | yolo {yolo} | preproc {preproc} | epochs {epochs} | dataset {dataset}", flush=True)
+    print(f"variant {variant}: stages {v['stages']} | gate features {v['features']} | seeds {seeds} | aug {aug} | yolo {yolo} | preproc {preproc} | epochs {epochs} | dataset {dataset} | sampling {sampling}", flush=True)
 
     start = time.time()
     try:
@@ -164,5 +167,5 @@ def run(variant: str = "D", seeds: str = "42", aug: str = "fog,sensor,geom", yol
 
 
 @app.local_entrypoint()
-def main(variant: str = "D", seeds: str = "42", aug: str = "fog,sensor,geom", yolo: str = "none", preproc: str = "1", epochs: int = 30, dataset: str = "fog_416"):
-    run.remote(variant, seeds, aug, yolo, preproc, epochs, dataset)
+def main(variant: str = "D", seeds: str = "42", aug: str = "fog,sensor,geom", yolo: str = "none", preproc: str = "1", epochs: int = 30, dataset: str = "fog_416", sampling: str = "none"):
+    run.remote(variant, seeds, aug, yolo, preproc, epochs, dataset, sampling)

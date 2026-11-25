@@ -60,14 +60,18 @@ FOG_BETAS = ["0.05", "0.06", "0.07", "0.08", "0.09", "0.10", "0.11", "0.12", "0.
 FOGGY_PROB = 2 / 3
 NUM_WORKERS = 6
 
-# augmentation, train split only. groups: fog, sensor, geom. env AUG="fog,sensor" picks groups, AUG=none turns all off
+# augmentation, train split only. groups: fog, sensor, geom, and the optional haze, color, wsensor
+# env AUG="fog,sensor" picks groups, AUG=none turns all off, "all" means the first three (fog, sensor, geom), the optional ones are never on unless named
 _aug_text = os.environ.get("AUG", "fog,sensor,geom")
 if _aug_text == "all":
-    _aug_text = "fog,sensor,geom" #"all" means all three groups
-AUG_GROUPS = {g for g in _aug_text.split(",") if g in ("fog", "sensor", "geom")}
+    _aug_text = "fog,sensor,geom" #"all" means the three standard groups
+AUG_GROUPS = {g for g in _aug_text.split(",") if g in ("fog", "sensor", "geom", "haze", "color", "wsensor")}
 AUG_FOG = "fog" in AUG_GROUPS       #our own depth-dependent fog rendered from the clean image
 AUG_SENSOR = "sensor" in AUG_GROUPS #blur, noise and jpeg on the foggy images
 AUG_GEOM = "geom" in AUG_GROUPS     #random crop and random affine on every training image
+AUG_HAZE = "haze" in AUG_GROUPS     #the rendered fog gets wider, more tinted colours, so it also looks like dust or smoke (needs fog)
+AUG_COLOR = "color" in AUG_GROUPS   #brightness, contrast, saturation, gamma and colour cast on every training image
+AUG_WEATHER_SENSOR = "wsensor" in AUG_GROUPS #blur, noise and jpeg also on the real bad weather images of the combined dataset
 
 # depth-dependent fog: t = exp(-tau), tau grows from the near field (bottom) to the far field (top), I = J * t + A * (1 - t)
 AUG_CUSTOM_FOG_PROB = 0.5           #share of the foggy samples that get our own fog, the rest keep the pre-rendered fog
@@ -96,6 +100,25 @@ AUG_AFFINE_SHEAR = 3.0              #degrees, plus or minus
 AUG_AFFINE_TRANSLATE = 0.1          #fraction of the image size, plus or minus
 AUG_BOX_MIN_SIDE = 2.0              #boxes thinner than this many pixels after a transform are dropped
 AUG_BOX_MIN_VISIBLE = 0.3           #boxes with less than this fraction still inside the image are dropped
+
+# haze group: the fog colour of the rendered fog, replaces AUG_AIRLIGHT_RANGE and AUG_AIRLIGHT_TINT, darker and more tinted, for dust and smoke
+AUG_HAZE_AIRLIGHT_RANGE = (0.3, 0.9)
+AUG_HAZE_AIRLIGHT_TINT = 0.15
+
+# color group: every training image, the letterbox bars are left alone
+AUG_COLOR_PROB = 0.8                #chance that an image gets colour changes at all
+AUG_COLOR_BRIGHTNESS = (0.7, 1.3)   #the image is multiplied by a number in this range
+AUG_COLOR_CONTRAST = (0.7, 1.3)     #below 1 flatter, above 1 more contrast, around the mean of the image
+AUG_COLOR_SATURATION = (0.6, 1.4)   #0 would be grey
+AUG_COLOR_GAMMA = (0.7, 1.4)        #below 1 brighter shadows, above 1 darker
+AUG_COLOR_CAST = 0.15               #each colour channel is multiplied by a number in 1 plus or minus this, a colour cast like dust, smoke or flood water
+
+# sampling of the training images, env SAMPLING: none = plain shuffle (what every run so far did), rare = repeat factor sampling
+# rare: an image with a class that only a small share of the images contain is drawn more often, one epoch still has the same number of images
+SAMPLING = os.environ.get("SAMPLING", "none")
+assert SAMPLING in ("none", "rare"), "SAMPLING must be none or rare"
+SAMPLE_RARE_THRESHOLD = 0.3         #classes in less than this share of the images are oversampled, the repeat factor is sqrt(threshold / share), 0.1 gave no boost to bicycle (11%) and motorcycle (11%)
+SAMPLE_MAX_REPEAT = 4.0             #largest repeat factor of an image
 
 # detector
 CLASS_NAMES = ["person", "car", "bus", "bicycle", "motorcycle"]
