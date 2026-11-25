@@ -1,0 +1,13 @@
+# Virtual Environment & Python Cache
+compvizenv/
+__pycache__/
+*.py[cod]
+
+# Datasets
+datasets/__pycache__/
+datasets/fog_416/
+datasets/combined_dataset
+
+# Large Model Weights & Incomplete Downloads (Recommended)
+*.pt
+*.part
